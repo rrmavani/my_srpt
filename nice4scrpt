@@ -1,0 +1,366 @@
+#!/bin/bash
+
+# config_ldap_files.sh - configure LDAP servers in ldap.conf or nslcd.conf
+#
+#   USAGE : config_ldap_files.sh $1 : [VM_LOCATION] = [ ATL/STL/CAN/UK/DFW ]
+
+
+DATE_STRING=$( date +"%Y%m%d" )
+
+echo
+
+HOSTNAME=$( hostname -s | awk '{ print tolower($0) }' )
+DOMAIN=$( hostname -d | awk '{ print tolower($0) }' )
+IP_ADDRESS=$( hostname -i )
+
+
+# backup existing ldap.conf (RHEL 5.x) or nslcd.conf and pam_ldap.conf files
+
+if [[ -f /etc/redhat-release ]]; then
+    if [[ -n $( grep "release 5" /etc/redhat-release ) ]]; then
+        LDAP_FILES=( "/etc/openldap/ldap.conf" "/etc/ldap.conf" )
+    else
+        LDAP_FILES=( "/etc/nslcd.conf" "/etc/pam_ldap.conf" )
+    fi
+else
+    echo "ERROR : ${HOSTNAME}.${DOMAIN} : ${IP_ADDRESS} : unable to determine operating system"
+    echo
+    exit
+fi
+
+if [[ $( /sbin/service chef-client status > /dev/null 2>&1; echo $? ) = "0" ]]; then
+    for file in ${LDAP_FILES[@]}
+    do
+        if [[ -n $( ls /var/chef/backup/${file}.chef-* 2>/dev/null ) ]]; then
+            echo "ERROR : ${HOSTNAME}.${DOMAIN} : ${IP_ADDRESS} : chef-client status = [running]"
+            echo
+            exit
+        fi
+    done
+fi
+
+SOURCE_FILE="ers-ssl.cer.file2"     # md5sum = 49f9cd29e2996d745d3f3bbcaf62c132
+
+CACERT_FILE="/etc/openldap/cacerts/ers-ssl.cer"
+
+mkdir -p $( dirname ${CACERT_FILE} )
+
+for this_filename in ${LDAP_FILES[@]} ${CACERT_FILE}
+do
+    if [[ -f ${this_filename}.default ]]; then
+        BACKUP_FILES=( $( ls ${this_filename}.default.* 2>/dev/null | sort ) )
+
+        if [[ -n ${BACKUP_FILES[@]} ]]; then
+            LAST_BACKUP_FILE=$( echo ${BACKUP_FILES[@]} | sed 's/ /\n/g' | tail -1 )
+
+            if [[ -n $( diff ${this_filename} ${LAST_BACKUP_FILE} ) ]]; then
+                cp -p ${this_filename} ${this_filename}.default.${DATE_STRING}
+            fi
+        elif [[ -n $( diff ${this_filename} ${this_filename}.default ) ]]; then
+            cp -p ${this_filename} ${this_filename}.default.${DATE_STRING}
+        fi
+    else
+        cp -p ${this_filename} ${this_filename}.default
+    fi
+done
+
+VALID_LOCATIONS=( "ALP" "STL" "CAN" "BHX" "ATL" "DFW" "LHR" "AUSB" "AUSU" "INDIA" )
+
+if [[ -n $( echo ${VALID_LOCATIONS[@]} | sed 's/ /\n/g' | grep "^$1$" ) ]]; then
+    VM_LOCATION="$1"
+elif [[ $( echo ${DOMAIN} ) =~ "prod.edc.domain.com" ]]; then
+    if [[ $( echo ${HOSTNAME} | cut -c1 ) = "a" ]]; then
+        VM_LOCATION="ATL"
+    elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "d" ]]; then
+        VM_LOCATION="DFW"
+    elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "l" ]] || [[ $( echo ${HOSTNAME} | cut -c1 ) = "w" ]]; then
+        VM_LOCATION="LHR"
+    elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "b" ]]; then
+        VM_LOCATION="AUSB"
+    elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "u" ]]; then
+        VM_LOCATION="AUSU"
+    else
+        echo "ERROR : ${HOSTNAME}.${DOMAIN} : ${IP_ADDRESS} : unable to determine valid location"
+        echo
+        exit
+    fi
+elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "a" ]]; then
+    VM_LOCATION="ALP"
+elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "s" ]]; then
+    VM_LOCATION="STL"
+elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "c" ]]; then
+    VM_LOCATION="CAN"
+elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "u" ]]; then
+    VM_LOCATION="BHX"
+elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "w" ]] || [[ $( echo ${HOSTNAME} | cut -c1 ) = "g" ]]; then
+    VM_LOCATION="BHX"
+elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "d" ]]; then
+    VM_LOCATION="DFW"
+elif [[ $( echo ${HOSTNAME} | cut -c1 ) = "i" ]]; then
+    VM_LOCATION="INDIA"
+else
+    echo "ERROR : ${HOSTNAME}.${DOMAIN} : ${IP_ADDRESS} : unable to determine valid location"
+    echo
+    exit
+fi
+
+ENVIRONMENT=$( echo ${HOSTNAME} | cut -c4 )     # [ d/p/t/u ]=[ DEV/PROD/TEST/UAT ]
+
+# TODO : sort this list of LDAP servers based on ping times from VM location
+
+ALP_TEST_LDAPS="ldaps://atlersdc5.ers.domain.com:636 ldaps://atlersdc6.ers.domain.com:636"
+ALP_PROD_LDAPS="ldaps://atlersdc6.ers.domain.com:636 ldaps://atlersdc5.ers.domain.com:636"
+STL_TEST_LDAPS="ldaps://stlersdc1.ers.domain.com:636 ldaps://stlersdc2.ers.domain.com:636"
+STL_PROD_LDAPS="ldaps://stlersdc2.ers.domain.com:636 ldaps://stlersdc1.ers.domain.com:636"
+CAN_SUSE_LDAPS="ldaps://yulersdc1.ers.domain.com:636"
+CAN_RHEL_LDAP="ldap://yulersdc1.ers.domain.com:389"    # TODO : find LDAPS solution for 6.x
+BHX_SUSE_LDAPS="ldaps://bhxersdc1.ers.domain.com:636"
+BHX_RHEL_LDAP="ldap://bhxersdc1.ers.domain.com:389"    # TODO : find LDAPS solution for 6.x
+ATL_TEST_LDAPS="ldaps://atl0ersdc1.ers.domain.com:636 ldaps://atl0ersdc2.ers.domain.com:636 ldaps://atl0ersdc3.ers.domain.com:636"
+ATL_PROD_LDAPS="ldaps://atl0ersdc3.ers.domain.com:636 ldaps://atl0ersdc2.ers.domain.com:636 ldaps://atl0ersdc1.ers.domain.com:636"
+DFW_TEST_LDAPS="ldaps://dfw0ersdc1.ers.domain.com:636 ldaps://dfw0ersdc2.ers.domain.com:636"
+DFW_PROD_LDAPS="ldaps://dfw0ersdc2.ers.domain.com:636 ldaps://dfw0ersdc1.ers.domain.com:636"
+LHR_TEST_LDAPS="ldaps://lhr0ersdc1.ers.domain.com:636 ldaps://lhr0ersdc2.ers.domain.com:636"
+LHR_PROD_LDAPS="ldaps://lhr0ersdc2.ers.domain.com:636 ldaps://lhr0ersdc1.ers.domain.com:636"
+AUSB_TEST_LDAPS="ldaps://syd0ersdc1.ers.domain.com:636 ldaps://syd0ersdc2.ers.domain.com:636"
+AUSB_PROD_LDAPS="ldaps://syd0ersdc2.ers.domain.com:636 ldaps://syd0ersdc1.ers.domain.com:636"
+AUSU_TEST_LDAPS="ldaps://syd1ersdc1.ers.domain.com:636 ldaps://syd1ersdc2.ers.domain.com:636"
+AUSU_PROD_LDAPS="ldaps://syd1ersdc2.ers.domain.com:636 ldaps://syd1ersdc1.ers.domain.com:636"
+INDIA_TEST_LDAPS="ldaps://bom0ersdc1.ers.domain.com:636 ldaps://bom0ersdc2.ers.domain.com:636"
+INDIA_PROD_LDAPS="ldaps://bom0ersdc2.ers.domain.com:636 ldaps://bom0ersdc1.ers.domain.com:636"
+INDIA_TEST_LDAP="ldap://bom0ersdc1.ers.domain.com:389 ldap://bom0ersdc2.ers.domain.com:389"
+INDIA_PROD_LDAP="ldap://bom0ersdc2.ers.domain.com:389 ldap://bom0ersdc1.ers.domain.com:389"
+
+
+if [[ ${VM_LOCATION} = "ALP" ]]; then
+    if [[ ${ENVIRONMENT} = "p" ]]; then
+        LDAP_SERVERS="${ALP_PROD_LDAPS} ${STL_PROD_LDAPS}"
+    else
+        LDAP_SERVERS="${ALP_TEST_LDAPS} ${STL_TEST_LDAPS}"
+    fi
+    if [[ -z $( grep "release 6" /etc/redhat-release ) ]]; then
+        LDAP_SERVERS="${LDAP_SERVERS} ${CAN_SUSE_LDAPS} ${BHX_SUSE_LDAPS}"
+    fi
+
+elif [[ ${VM_LOCATION} = "STL" ]]; then
+    if [[ ${ENVIRONMENT} = "p" ]]; then
+        LDAP_SERVERS="${STL_PROD_LDAPS} ${ALP_PROD_LDAPS}"
+    else
+        LDAP_SERVERS="${STL_TEST_LDAPS} ${ALP_TEST_LDAPS}"
+    fi
+    if [[ -z $( grep "release 6" /etc/redhat-release ) ]]; then
+        LDAP_SERVERS="${LDAP_SERVERS} ${CAN_SUSE_LDAPS} ${BHX_SUSE_LDAPS}"
+    fi
+
+elif [[ ${VM_LOCATION} = "CAN" ]]; then
+    if [[ -z $( grep "release 6" /etc/redhat-release ) ]]; then
+        if [[ ${ENVIRONMENT} = "p" ]]; then
+            LDAP_SERVERS="${CAN_SUSE_LDAPS} ${ALP_PROD_LDAPS} ${STL_PROD_LDAPS} ${BHX_SUSE_LDAPS}"
+        else
+            LDAP_SERVERS="${CAN_SUSE_LDAPS} ${ALP_TEST_LDAPS} ${STL_TEST_LDAPS} ${BHX_SUSE_LDAPS}"
+        fi
+    elif [[ ${ENVIRONMENT} = "p" ]]; then
+        LDAP_SERVERS="${CAN_RHEL_LDAP} ${ALP_PROD_LDAPS} ${STL_PROD_LDAPS}"
+    else
+        LDAP_SERVERS="${CAN_RHEL_LDAP} ${ALP_TEST_LDAPS} ${STL_TEST_LDAPS}"
+    fi
+
+elif [[ ${VM_LOCATION} = "BHX" ]]; then
+    if [[ -z $( grep "release 6" /etc/redhat-release ) ]]; then
+        if [[ ${ENVIRONMENT} = "p" ]]; then
+            LDAP_SERVERS="${BHX_SUSE_LDAPS} ${ALP_PROD_LDAPS} ${STL_PROD_LDAPS} ${CAN_SUSE_LDAPS}"
+        else
+            LDAP_SERVERS="${BHX_SUSE_LDAPS} ${ALP_TEST_LDAPS} ${STL_TEST_LDAPS} ${CAN_SUSE_LDAPS}"
+        fi
+    elif [[ $( ping -c1 -w1 lhr0ersdc1.ers.domain.com > /dev/null 2>&1; echo $? ) = "0" ]]; then
+        if [[ ${ENVIRONMENT} = "p" ]]; then
+            LDAP_SERVERS="${LHR_PROD_LDAPS} ${ALP_PROD_LDAPS} ${STL_PROD_LDAPS}"
+        else
+            LDAP_SERVERS="${LHR_TEST_LDAPS} ${ALP_TEST_LDAPS} ${STL_TEST_LDAPS}"
+        fi
+    elif [[ ${ENVIRONMENT} = "p" ]]; then
+        LDAP_SERVERS="${BHX_RHEL_LDAP} ${ALP_PROD_LDAPS} ${STL_PROD_LDAPS}"
+    else
+        LDAP_SERVERS="${BHX_RHEL_LDAP} ${ALP_TEST_LDAPS} ${STL_TEST_LDAPS}"
+    fi
+
+elif [[ ${VM_LOCATION} = "ATL" ]]; then
+    if [[ ${DOMAIN} = "prod.edc.domain.com" ]]; then
+        LDAP_SERVERS="${ATL_PROD_LDAPS}"
+    else
+        LDAP_SERVERS="${ATL_TEST_LDAPS}"
+    fi
+
+elif [[ ${VM_LOCATION} = "DFW" ]]; then
+    if [[ $( echo ${DOMAIN} ) =~ "prod.edc.domain.com" ]]; then
+        if [[ ${DOMAIN} = "prod.edc.domain.com" ]]; then
+            LDAP_SERVERS="${DFW_PROD_LDAPS}"
+        else
+            LDAP_SERVERS="${DFW_TEST_LDAPS}"
+        fi
+    elif [[ ${ENVIRONMENT} = "p" ]]; then
+        LDAP_SERVERS="${DFW_PROD_LDAPS} ${ALP_PROD_LDAPS} ${STL_PROD_LDAPS}"
+    else
+        LDAP_SERVERS="${DFW_TEST_LDAPS} ${ALP_TEST_LDAPS} ${STL_TEST_LDAPS}"
+    fi
+
+elif [[ ${VM_LOCATION} = "LHR" ]]; then
+    if [[ ${DOMAIN} = "prod.edc.domain.com" ]]; then
+        LDAP_SERVERS="${LHR_PROD_LDAPS}"
+    else
+        LDAP_SERVERS="${LHR_TEST_LDAPS}"
+    fi
+
+elif [[ ${VM_LOCATION} = "AUSB" ]]; then
+    if [[ ${DOMAIN} = "prod.edc.domain.com" ]]; then
+        LDAP_SERVERS="${AUSB_PROD_LDAPS}"
+    else
+        LDAP_SERVERS="${AUSB_TEST_LDAPS}"
+    fi
+
+elif [[ ${VM_LOCATION} = "AUSU" ]]; then
+    if [[ ${DOMAIN} = "prod.edc.domain.com" ]]; then
+        LDAP_SERVERS="${AUSU_PROD_LDAPS}"
+    else
+        LDAP_SERVERS="${AUSU_TEST_LDAPS}"
+    fi
+
+elif [[ ${VM_LOCATION} = "INDIA" ]]; then
+    if [[ ${ENVIRONMENT} = "p" ]]; then
+        LDAP_SERVERS="${INDIA_PROD_LDAP} ${ALP_PROD_LDAPS} ${STL_PROD_LDAPS}"       # TODO : find LDAPS solution
+    else
+        LDAP_SERVERS="${INDIA_TEST_LDAP} ${ALP_TEST_LDAPS} ${STL_TEST_LDAPS}"       # TODO : find LDAPS solution
+    fi
+fi
+
+
+RESTART_NSLCD_SERVICE="FALSE"
+RESTART_NSCD_SERVICE="FALSE"
+
+for this_ldap_file in ${LDAP_FILES[@]}
+do
+    if [[ -z $( grep "^uri ${LDAP_SERVERS[@]}$" ${this_ldap_file} ) ]]; then
+        sed -i "s+^uri .*+uri ${LDAP_SERVERS[@]}+g" ${this_ldap_file}
+        RESTART_NSLCD_SERVICE="TRUE"
+        RESTART_NSCD_SERVICE="TRUE"
+    fi
+
+    if [[ -n $( grep "release 5" /etc/redhat-release ) ]]; then
+        if [[ -n $( grep "^filter passwd" ${this_ldap_file} ) ]]; then
+            sed -i '/^filter passwd/ s/))$//g' ${this_ldap_file}
+            sed -i 's/^filter passwd (&(objectClass=user)(/nss_base_passwd ou=accounts,ou=accessmgmnt,dc=ers,dc=xxxxxxxx,dc=com?sub?/g' ${this_ldap_file}
+        fi
+        if [[ -n $( grep "^filter shadow" ${this_ldap_file} ) ]]; then
+            sed -i '/^filter shadow/ s/))$//g' ${this_ldap_file}
+            sed -i 's/^filter shadow (&(objectClass=user)(/nss_base_shadow ou=accounts,ou=accessmgmnt,dc=ers,dc=xxxxxxx,dc=com?sub?/g' ${this_ldap_file}
+        fi
+        if [[ -n $( grep "^filter group" ${this_ldap_file} ) ]]; then
+            sed -i 's/^filter group (&(objectClass=group)(gidNumber=\*))$/nss_base_group ou=privilegedgroups,ou=accessmgmnt,dc=ers,dc=xxxxxxx,dc=com/g' ${this_ldap_file}
+        fi
+    fi
+
+    if [[ -n $( grep "^TLS_CACERT " ${this_ldap_file} ) ]]; then            # ldap.conf
+        if [[ -z $( grep "^TLS_CACERT ${CACERT_FILE}$" ${this_ldap_file} ) ]]; then
+            sed -i "s+^TLS_CACERT .*+TLS_CACERT ${CACERT_FILE}+g" ${this_ldap_file}
+            RESTART_NSCD_SERVICE="TRUE"
+        fi
+    elif [[ -n $( grep "^tls_cacertfile " ${this_ldap_file} ) ]]; then      # nslcd.conf
+        if [[ -z $( grep "^tls_cacertfile ${CACERT_FILE}$" ${this_ldap_file} ) ]]; then
+            sed -i "s+^tls_cacertfile .*+tls_cacertfile ${CACERT_FILE}+g" ${this_ldap_file}
+            RESTART_NSLCD_SERVICE="TRUE"
+            RESTART_NSCD_SERVICE="TRUE"
+        fi
+    elif [[ -n $( grep "^TLS_CACERTDIR " ${this_ldap_file} ) ]]; then       # ldap.conf
+        if [[ -z $( grep "^TLS_CACERTDIR $( dirname ${CACERT_FILE} )$" ${this_ldap_file} ) ]]; then
+            sed -i "s+^TLS_CACERTDIR .*+TLS_CACERTDIR $( dirname ${CACERT_FILE} )+g" ${this_ldap_file}
+            RESTART_NSCD_SERVICE="TRUE"
+        fi
+    elif [[ -n $( grep "^tls_cacertdir " ${this_ldap_file} ) ]]; then       # nslcd.conf
+        if [[ -z $( grep "^tls_cacertdir $( dirname ${CACERT_FILE} )$" ${this_ldap_file} ) ]]; then
+            sed -i "s+^tls_cacertdir .*+tls_cacertdir $( dirname ${CACERT_FILE} )+g" ${this_ldap_file}
+            RESTART_NSLCD_SERVICE="TRUE"
+            RESTART_NSCD_SERVICE="TRUE"
+        fi
+    else
+        echo "ERROR : ${HOSTNAME} : ${IP_ADDRESS} : unable to determine CACERT file"
+        echo
+        exit
+    fi
+done
+
+if [[ $( ping -c1 -w1 ac9katello3.fabric.c9.domain.com > /dev/null 2>&1; echo $? ) = "0" ]]; then
+    WGET_LOCATION="ac9katello3.fabric.c9.domain.com/pub/nixsa/scripts/software"
+elif [[ $( ping -c1 -w1 ac9susemgr1.fabric.c9.domain.com > /dev/null 2>&1; echo $? ) = "0" ]]; then
+    WGET_LOCATION="ac9susemgr1.fabric.c9.domain.com/pub/post/nixsa/scripts/software"
+else
+    echo "ERROR : ${HOSTNAME} : ${IP_ADDRESS} : unable to download correct CACERT file"
+    echo
+    exit
+fi
+wget -nv http://${WGET_LOCATION}/${SOURCE_FILE} -O /tmp/ers-ssl.cer
+echo
+
+if [[ -z $( ls ${CACERT_FILE} 2>/dev/null ) ]]; then
+    mkdir -p $( dirname ${CACERT_FILE} )
+    touch ${CACERT_FILE}
+fi
+
+if [[ -n $( diff ${CACERT_FILE} /tmp/ers-ssl.cer ) ]]; then
+    cp -p /tmp/ers-ssl.cer ${CACERT_FILE}
+    chmod 644 ${CACERT_FILE}
+    RESTART_NSLCD_SERVICE="TRUE"
+    RESTART_NSCD_SERVICE="TRUE"
+fi
+
+
+if [[ -n $( /sbin/chkconfig --list nslcd 2>/dev/null | grep ":on" ) ]]; then
+    if [[ $( /sbin/service nslcd status > /dev/null 2>&1; echo $? ) = "0" ]]; then
+        if [[ ${RESTART_NSLCD_SERVICE} = "TRUE" ]]; then
+            echo "Restart (nslcd) service, since something has changed ..."
+            /sbin/service nslcd restart
+            echo
+        fi
+    fi
+fi
+
+if [[ -n $( /sbin/chkconfig --list nscd 2>/dev/null | grep ":on" ) ]]; then
+    if [[ $( /sbin/service nscd status > /dev/null 2>&1; echo $? ) = "0" ]]; then
+        if [[ ${RESTART_NSCD_SERVICE} = "TRUE" ]]; then
+            echo "Restart (nscd) service, since something has changed ..."
+            /sbin/service nscd restart
+            echo
+        fi
+    fi
+fi
+
+
+LDAP_GROUPS=( $( cat ${LDAP_FILES[@]} | grep 'passwd ' | sort | uniq | grep -o ":=cn=[^,]*," | awk -F= '{ print $NF }' | cut -d, -f1 ) )
+
+if [[ -f /etc/sudoers.d/erspriv ]]; then
+    SUDOERS_FILES="/etc/sudoers /etc/sudoers.d/erspriv"
+else
+    SUDOERS_FILES="/etc/sudoers"
+fi
+
+SUDO_GROUPS=( $( cat ${SUDOERS_FILES} | grep "SA_CMDS$" | grep -v "^#" | grep -v "^%smtool" | grep -v "^%sa" | grep -v "^%cloudcoe" | grep -v "^%efx_accessmgmnt" | awk '{ print $1 }' | sed 's/%//g' ) )
+
+SUDO_GROUPS=( $( echo ${SUDO_GROUPS[@]} | sed 's/ /\n/g' | grep "sudo" ) $( echo ${SUDO_GROUPS[@]} | sed 's/ /\n/g' | grep -v "sudo" ) )
+
+printf "LDAP Groups  :"
+for (( index=0; index < ${#LDAP_GROUPS[@]}; index++ ))
+do
+    PRINT_WIDTH=$( echo ${LDAP_GROUPS[$index]} ${SUDO_GROUPS[$index]} | sed 's/ /\n/g' | wc -L )
+    printf "  %-${PRINT_WIDTH}s" "${LDAP_GROUPS[$index]}"
+done
+echo
+
+printf "SUDO Groups  :"
+for (( index=0; index < ${#SUDO_GROUPS[@]}; index++ ))
+do
+    PRINT_WIDTH=$( echo ${LDAP_GROUPS[$index]} ${SUDO_GROUPS[$index]} | sed 's/ /\n/g' | wc -L )
+    printf "  %-${PRINT_WIDTH}s" "${SUDO_GROUPS[$index]}"
+done
+echo
+
+echo
+
